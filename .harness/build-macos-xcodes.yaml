@@ -9,7 +9,7 @@ pipeline:
         identifier: build_custom_image
         type: CI
         name: Build Custom macOS Image
-        description: Pull Harness base image, install Xcode versions via Apple or GCS, optionally push to registry
+        description: Pull Harness base image, install Xcode versions from GCS, optionally push to registry
         spec:
           cloneCodebase: false
           caching:
@@ -248,84 +248,42 @@ pipeline:
                       eval "$(/opt/homebrew/bin/brew shellenv)"
 
                       XCODE_VERSIONS="<+pipeline.variables.xcode_versions>"
-                      DOWNLOAD_SOURCE="<+pipeline.variables.download_source>"
+                      GCS_BUCKET="<+pipeline.variables.gcs_bucket>"
+                      GCP_SA_KEY="<+stage.variables.gcp_sa_key>"
                       XCODE_CACHE_DIR="$HOME/XcodesCache"
                       mkdir -p "$XCODE_CACHE_DIR"
 
-                      echo "[INFO] Download source: $DOWNLOAD_SOURCE"
                       echo "[INFO] Xcode versions: $XCODE_VERSIONS"
+                      echo "[INFO] GCS bucket: $GCS_BUCKET"
                       echo ""
 
+                      echo "$GCP_SA_KEY" | base64 -d > /tmp/gcp-sa.json
+                      gcloud auth activate-service-account --key-file=/tmp/gcp-sa.json --quiet
+                      rm -f /tmp/gcp-sa.json
+
                       IFS=',' read -ra VERSIONS <<< "$XCODE_VERSIONS"
+                      for VERSION in "${VERSIONS[@]}"; do
+                        VERSION=$(echo "$VERSION" | xargs)
+                        GCS_PATH="gs://$GCS_BUCKET/Xcode-${VERSION}.xip"
+                        LOCAL_FILE="$XCODE_CACHE_DIR/Xcode_${VERSION%+*}.xip"
 
-                      if [[ "$DOWNLOAD_SOURCE" == "gcs" ]]; then
-                        # GCS mode: authenticate and download from bucket
-                        GCS_BUCKET="<+pipeline.variables.gcs_bucket>"
-                        GCP_SA_KEY="<+pipeline.variables.gcp_sa_key>"
+                        echo "================================="
+                        echo "[INFO] Xcode $VERSION"
+                        echo "  Source: $GCS_PATH"
+                        echo "  Dest:   $LOCAL_FILE"
 
-                        echo "$GCP_SA_KEY" | base64 -d > /tmp/gcp-sa.json
-                        gcloud auth activate-service-account --key-file=/tmp/gcp-sa.json --quiet
-                        rm -f /tmp/gcp-sa.json
+                        if [[ -f "$LOCAL_FILE" ]]; then
+                          echo "[INFO] Already cached, skipping"
+                          continue
+                        fi
 
-                        echo "[INFO] Downloading from GCS bucket: $GCS_BUCKET"
-                        for VERSION in "${VERSIONS[@]}"; do
-                          VERSION=$(echo "$VERSION" | xargs)
-                          GCS_PATH="gs://$GCS_BUCKET/Xcode-${VERSION}.xip"
-                          LOCAL_FILE="$XCODE_CACHE_DIR/Xcode_${VERSION%+*}.xip"
-
-                          echo "================================="
-                          echo "[INFO] Xcode $VERSION"
-                          echo "  Source: $GCS_PATH"
-                          echo "  Dest:   $LOCAL_FILE"
-
-                          if [[ -f "$LOCAL_FILE" ]]; then
-                            echo "[INFO] Already cached, skipping"
-                            continue
-                          fi
-
-                          if gcloud storage cp "$GCS_PATH" "$LOCAL_FILE"; then
-                            echo "[SUCCESS] Downloaded ($(du -h "$LOCAL_FILE" | cut -f1))"
-                          else
-                            echo "[ERROR] Failed to download $GCS_PATH"
-                            exit 1
-                          fi
-                        done
-
-                      else
-                        # Apple mode: download using xcodes CLI with Apple ID
-                        APPLE_ID="<+pipeline.variables.apple_id>"
-                        APPLE_PASSWORD="<+pipeline.variables.apple_password>"
-
-                        export XCODES_USERNAME="$APPLE_ID"
-                        export XCODES_PASSWORD="$APPLE_PASSWORD"
-
-                        echo "[INFO] Downloading from Apple Developer (xcodes CLI)"
-                        for VERSION in "${VERSIONS[@]}"; do
-                          VERSION=$(echo "$VERSION" | xargs)
-                          SHORT_VER="${VERSION%+*}"
-                          LOCAL_FILE="$XCODE_CACHE_DIR/Xcode_${SHORT_VER}.xip"
-
-                          echo "================================="
-                          echo "[INFO] Xcode $SHORT_VER"
-
-                          if [[ -f "$LOCAL_FILE" ]]; then
-                            echo "[INFO] Already cached, skipping"
-                            continue
-                          fi
-
-                          echo "[INFO] Downloading via xcodes..."
-                          xcodes download "$SHORT_VER" --directory "$XCODE_CACHE_DIR"
-
-                          DOWNLOADED=$(find "$XCODE_CACHE_DIR" -name "Xcode*${SHORT_VER}*.xip" -o -name "Xcode_${SHORT_VER}.xip" | head -1)
-                          if [[ -n "$DOWNLOADED" && -f "$DOWNLOADED" ]]; then
-                            mv "$DOWNLOADED" "$LOCAL_FILE" 2>/dev/null || true
-                            echo "[SUCCESS] Downloaded ($(du -h "$LOCAL_FILE" | cut -f1))"
-                          else
-                            echo "[ERROR] Failed to download Xcode $SHORT_VER from Apple"
-                            exit 1
-                          fi
-                        done
-                      fi
+                        if gcloud storage cp "$GCS_PATH" "$LOCAL_FILE"; then
+                          echo "[SUCCESS] Downloaded ($(du -h "$LOCAL_FILE" | cut -f1))"
+                        else
+                          echo "[ERROR] Failed to download $GCS_PATH"
+                          exit 1
+                        fi
+                      done
 
                       echo ""
                       echo "[SUCCESS] All Xcodes downloaded:"
@@ -420,8 +378,8 @@ pipeline:
         variables:
           - name: gcp_sa_key
             type: Secret
-            description: "(GCS mode only) GCP service account key, base64 encoded"
-            required: false
+            description: GCP service account key, base64 encoded
+            required: true
             value: <+input>
         delegateSelectors:
           - mac-delegate-admin
@@ -441,29 +399,11 @@ pipeline:
         e.g: 16.4.0+16F6,16.3.0+16E140
       required: true
       value: "16.4.0+16F6,16.3.0+16E140"
-    - name: download_source
-      type: String
-      description: |-
-        Where to download Xcode installers from.
-        "apple" = download from Apple using Apple ID credentials (default)
-        "gcs" = download from a GCS bucket (requires gcp_sa_key and gcs_bucket)
-      required: true
-      value: apple
-    - name: apple_id
-      type: String
-      description: "(Apple mode) Apple Developer account email"
-      required: false
-      value: <+input>
-    - name: apple_password
-      type: Secret
-      description: "(Apple mode) Apple App-Specific Password"
-      required: false
-      value: <+input>
     - name: gcs_bucket
       type: String
-      description: "(GCS mode) GCS bucket name containing Xcode xip files"
-      required: false
-      value: ""
+      description: GCS bucket name containing Xcode xip files
+      required: true
+      value: <+input>
     - name: vm_name
       type: String
       description: Name for the locally built VM
