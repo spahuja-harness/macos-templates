@@ -1,0 +1,492 @@
+pipeline:
+  identifier: build_macos_xcodes
+  name: build-macos-xcodes
+  tags: {}
+  stages:
+    - stage:
+        identifier: build_custom_image
+        type: CI
+        name: Build Custom macOS Image
+        description: Pull Harness base image, install Xcode versions via Apple or GCS, optionally push to registry
+        spec:
+          cloneCodebase: false
+          caching:
+            enabled: false
+            override: true
+            paths: []
+          platform:
+            os: MacOS
+            arch: Arm64
+          runtime:
+            type: Docker
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  identifier: Install_Tools
+                  type: Run
+                  name: Install Tools
+                  spec:
+                    shell: Sh
+                    command: |-
+                      set -euo pipefail
+
+                      export NONINTERACTIVE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+
+                      command -v brew >/dev/null 2>&1 || /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+                      eval "$(/opt/homebrew/bin/brew shellenv)"
+
+                      brew install hashicorp/tap/packer cirruslabs/cli/tart jq
+                      brew install xcodes 2>/dev/null || true
+
+                      echo "[INFO] Installed versions:"
+                      packer -version
+                      tart --version
+                      jq --version
+                      xcodes version
+              - step:
+                  identifier: Write_Template
+                  type: Run
+                  name: Write Packer Template
+                  spec:
+                    shell: Sh
+                    command: |-
+                      set -euo pipefail
+
+                      DEST="$HOME/packer-templates"
+                      mkdir -p "$DEST"
+
+                      cat > "$DEST/macos-sequoia-xcode.pkr.hcl" << 'PACKER_EOF'
+                      packer {
+                        required_plugins {
+                          tart = {
+                            version = ">= 1.12.0"
+                            source  = "github.com/cirruslabs/tart"
+                          }
+                        }
+                      }
+
+                      variable "base_image" {
+                        type        = string
+                        description = "Harness base image to build on top of"
+                        default     = "registry-1.docker.io/harness/macos-images:base_sequoia_15.6.1"
+                      }
+
+                      variable "vm_name" {
+                        type        = string
+                        description = "Name for the output VM"
+                        default     = "sequoia-xcodes"
+                      }
+
+                      variable "xcode_version" {
+                        type        = list(string)
+                        description = "Xcode versions to install (first one becomes default)"
+                        default     = ["16.4", "16.3"]
+                      }
+
+                      variable "xcode_cache_dir" {
+                        type        = string
+                        description = "Path to directory containing Xcode xip files"
+                        default     = "~/XcodesCache"
+                      }
+
+                      variable "ssh_username" {
+                        type      = string
+                        sensitive = true
+                        default   = "anka"
+                      }
+
+                      variable "ssh_password" {
+                        type        = string
+                        sensitive   = true
+                        description = "SSH password for the VM (contact support for Harness base image credentials)"
+                      }
+
+                      variable "push_to_registry" {
+                        type        = bool
+                        description = "Whether to push the built image to a registry"
+                        default     = false
+                      }
+
+                      variable "registry_image" {
+                        type        = string
+                        description = "Full registry path to push (e.g. registry-1.docker.io/org/repo:tag)"
+                        default     = ""
+                      }
+
+                      source "tart-cli" "tart" {
+                        vm_base_name       = var.base_image
+                        vm_name            = var.vm_name
+                        cpu_count          = 6
+                        memory_gb          = 12
+                        disk_size_gb       = 350
+                        ssh_password       = var.ssh_password
+                        ssh_username       = var.ssh_username
+                        ssh_timeout        = "180s"
+                        create_grace_time  = "120s"
+                        recovery_partition = "keep"
+                      }
+
+                      locals {
+                        xcode_install_provisioners = [
+                          for version in reverse(sort(var.xcode_version)) : {
+                            inline = [
+                              "source ~/.bash_profile",
+                              "echo '[INFO] Installing Xcode ${version}...'",
+                              "sudo xcodes install ${version} --experimental-unxip --path /Users/${var.ssh_username}/Downloads/Xcode_${version}.xip --select --empty-trash",
+                              "INSTALLED_PATH=$(xcodes select -p)",
+                              "CONTENTS_DIR=$(dirname $INSTALLED_PATH)",
+                              "APP_DIR=$(dirname $CONTENTS_DIR)",
+                              "sudo mv $APP_DIR /Applications/Xcode_${version}.app",
+                              "sudo xcode-select -s /Applications/Xcode_${version}.app",
+                              "xcodebuild -runFirstLaunch",
+                              "echo '[SUCCESS] Xcode ${version} installed'",
+                            ]
+                          }
+                        ]
+                      }
+
+                      build {
+                        sources = ["source.tart-cli.tart"]
+
+                        provisioner "file" {
+                          sources     = [for version in var.xcode_version : pathexpand("${var.xcode_cache_dir}/Xcode_${version}.xip")]
+                          destination = "/Users/${var.ssh_username}/Downloads/"
+                        }
+
+                        dynamic "provisioner" {
+                          for_each = local.xcode_install_provisioners
+                          labels   = ["shell"]
+                          content {
+                            inline = provisioner.value.inline
+                          }
+                        }
+
+                        provisioner "shell" {
+                          inline = [
+                            "source ~/.bash_profile",
+                            "sudo xcodes select '${var.xcode_version[0]}'",
+                            "xcodebuild -version",
+                          ]
+                        }
+
+                        provisioner "shell" {
+                          inline = [
+                            "echo '=== Installed Xcode Versions ==='",
+                            "for app in /Applications/Xcode_*.app; do [ -d \"$app\" ] || continue; ver=$(defaults read \"$app/Contents/version.plist\" CFBundleShortVersionString 2>/dev/null || echo unknown); echo \"  $(basename $app): $ver\"; done",
+                            "echo ''",
+                            "echo '=== Default Xcode ==='",
+                            "xcode-select -p",
+                            "xcodebuild -version",
+                            "echo ''",
+                            "echo '=== Swift ==='",
+                            "swift --version",
+                          ]
+                        }
+
+                        provisioner "shell" {
+                          inline = [
+                            "rm -rf /Users/${var.ssh_username}/Downloads/Xcode_*.xip",
+                          ]
+                        }
+
+                        post-processor "shell-local" {
+                          inline = concat(
+                            var.push_to_registry && var.registry_image != "" ? [
+                              "tart push ${var.vm_name} ${var.registry_image}",
+                              "echo '[SUCCESS] Pushed to ${var.registry_image}'"
+                            ] : [
+                              "echo '[INFO] Push disabled — image available locally as: ${var.vm_name}'"
+                            ]
+                          )
+                        }
+                      }
+                      PACKER_EOF
+
+                      echo "[SUCCESS] Packer template written to $DEST/macos-sequoia-xcode.pkr.hcl"
+                      ls -la "$DEST"
+              - step:
+                  identifier: Docker_Login
+                  type: Run
+                  name: Docker Login
+                  spec:
+                    shell: Sh
+                    command: |-
+                      set -euo pipefail
+
+                      DOCKERHUB_USERNAME="<+pipeline.variables.dockerhub_username>"
+                      DOCKERHUB_TOKEN="<+pipeline.variables.dockerhub_token>"
+
+                      CFG="$HOME/.docker/config.json"
+                      mkdir -p "$(dirname "$CFG")"
+                      [ -s "$CFG" ] || echo '{}' > "$CFG"
+
+                      set +x
+                      AUTH="$(printf '%s:%s' "$DOCKERHUB_USERNAME" "$DOCKERHUB_TOKEN" | /usr/bin/base64)"
+                      jq --arg auth "$AUTH" '
+                        .auths = (.auths // {}) |
+                        .auths["registry-1.docker.io"].auth = $auth |
+                        .auths["https://registry-1.docker.io"].auth = $auth |
+                        .auths["https://index.docker.io/v1/"].auth = $auth
+                      ' "$CFG" > "${CFG}.tmp"
+                      set -x
+
+                      mv "${CFG}.tmp" "$CFG"
+                      chmod 600 "$CFG"
+                      echo "[SUCCESS] Docker Hub auth configured"
+              - step:
+                  identifier: Download_Xcodes
+                  type: Run
+                  name: Download Xcode Installers
+                  spec:
+                    shell: Sh
+                    command: |-
+                      set -euo pipefail
+
+                      eval "$(/opt/homebrew/bin/brew shellenv)"
+
+                      XCODE_VERSIONS="<+pipeline.variables.xcode_versions>"
+                      DOWNLOAD_SOURCE="<+pipeline.variables.download_source>"
+                      XCODE_CACHE_DIR="$HOME/XcodesCache"
+                      mkdir -p "$XCODE_CACHE_DIR"
+
+                      echo "[INFO] Download source: $DOWNLOAD_SOURCE"
+                      echo "[INFO] Xcode versions: $XCODE_VERSIONS"
+                      echo ""
+
+                      IFS=',' read -ra VERSIONS <<< "$XCODE_VERSIONS"
+
+                      if [[ "$DOWNLOAD_SOURCE" == "gcs" ]]; then
+                        # GCS mode: authenticate and download from bucket
+                        GCS_BUCKET="<+pipeline.variables.gcs_bucket>"
+                        GCP_SA_KEY="<+pipeline.variables.gcp_sa_key>"
+
+                        echo "$GCP_SA_KEY" | base64 -d > /tmp/gcp-sa.json
+                        gcloud auth activate-service-account --key-file=/tmp/gcp-sa.json --quiet
+                        rm -f /tmp/gcp-sa.json
+
+                        echo "[INFO] Downloading from GCS bucket: $GCS_BUCKET"
+                        for VERSION in "${VERSIONS[@]}"; do
+                          VERSION=$(echo "$VERSION" | xargs)
+                          GCS_PATH="gs://$GCS_BUCKET/Xcode-${VERSION}.xip"
+                          LOCAL_FILE="$XCODE_CACHE_DIR/Xcode_${VERSION%+*}.xip"
+
+                          echo "================================="
+                          echo "[INFO] Xcode $VERSION"
+                          echo "  Source: $GCS_PATH"
+                          echo "  Dest:   $LOCAL_FILE"
+
+                          if [[ -f "$LOCAL_FILE" ]]; then
+                            echo "[INFO] Already cached, skipping"
+                            continue
+                          fi
+
+                          if gcloud storage cp "$GCS_PATH" "$LOCAL_FILE"; then
+                            echo "[SUCCESS] Downloaded ($(du -h "$LOCAL_FILE" | cut -f1))"
+                          else
+                            echo "[ERROR] Failed to download $GCS_PATH"
+                            exit 1
+                          fi
+                        done
+
+                      else
+                        # Apple mode: download using xcodes CLI with Apple ID
+                        APPLE_ID="<+pipeline.variables.apple_id>"
+                        APPLE_PASSWORD="<+pipeline.variables.apple_password>"
+
+                        export XCODES_USERNAME="$APPLE_ID"
+                        export XCODES_PASSWORD="$APPLE_PASSWORD"
+
+                        echo "[INFO] Downloading from Apple Developer (xcodes CLI)"
+                        for VERSION in "${VERSIONS[@]}"; do
+                          VERSION=$(echo "$VERSION" | xargs)
+                          SHORT_VER="${VERSION%+*}"
+                          LOCAL_FILE="$XCODE_CACHE_DIR/Xcode_${SHORT_VER}.xip"
+
+                          echo "================================="
+                          echo "[INFO] Xcode $SHORT_VER"
+
+                          if [[ -f "$LOCAL_FILE" ]]; then
+                            echo "[INFO] Already cached, skipping"
+                            continue
+                          fi
+
+                          echo "[INFO] Downloading via xcodes..."
+                          xcodes download "$SHORT_VER" --directory "$XCODE_CACHE_DIR"
+
+                          DOWNLOADED=$(find "$XCODE_CACHE_DIR" -name "Xcode*${SHORT_VER}*.xip" -o -name "Xcode_${SHORT_VER}.xip" | head -1)
+                          if [[ -n "$DOWNLOADED" && -f "$DOWNLOADED" ]]; then
+                            mv "$DOWNLOADED" "$LOCAL_FILE" 2>/dev/null || true
+                            echo "[SUCCESS] Downloaded ($(du -h "$LOCAL_FILE" | cut -f1))"
+                          else
+                            echo "[ERROR] Failed to download Xcode $SHORT_VER from Apple"
+                            exit 1
+                          fi
+                        done
+                      fi
+
+                      echo ""
+                      echo "[SUCCESS] All Xcodes downloaded:"
+                      ls -lh "$XCODE_CACHE_DIR"
+                  timeout: 3h
+              - step:
+                  identifier: Packer_Build
+                  type: Run
+                  name: Packer Build
+                  spec:
+                    shell: Sh
+                    command: |-
+                      set -euo pipefail
+
+                      eval "$(/opt/homebrew/bin/brew shellenv)"
+
+                      WORK_DIR="$HOME/packer-templates"
+                      XCODE_CACHE_DIR="$HOME/XcodesCache"
+                      BASE_IMAGE="<+pipeline.variables.base_image>"
+                      VM_NAME="<+pipeline.variables.vm_name>"
+                      XCODE_VERSIONS="<+pipeline.variables.xcode_versions>"
+                      PUSH="<+pipeline.variables.push_to_registry>"
+                      REGISTRY_IMAGE="<+pipeline.variables.registry_image>"
+
+                      # Extract short version names for HCL list
+                      IFS=',' read -ra VERSIONS <<< "$XCODE_VERSIONS"
+                      LINKS=()
+                      for V in "${VERSIONS[@]}"; do
+                        V=$(echo "$V" | xargs)
+                        LINKS+=("${V%+*}")
+                      done
+                      HCL_LIST=$(printf '"%s",' "${LINKS[@]}" | sed 's/,$//')
+
+                      export PACKER_LOG=1
+                      export PACKER_LOG_PATH="$HOME/logs/packer.log"
+                      export PACKER_NO_COLOR=1
+                      mkdir -p "$HOME/logs"
+
+                      trap 'echo "--- packer log (last 200 lines) ---"; tail -n 200 "$PACKER_LOG_PATH" || true' ERR
+
+                      cd "$WORK_DIR"
+
+                      echo "==========================================="
+                      echo "[INFO] Build Configuration"
+                      echo "  Base Image:      $BASE_IMAGE"
+                      echo "  VM Name:         $VM_NAME"
+                      echo "  Xcode Versions:  ${LINKS[*]}"
+                      echo "  Push to Registry: $PUSH"
+                      if [[ "$PUSH" == "true" ]]; then
+                        echo "  Registry Image:  $REGISTRY_IMAGE"
+                      fi
+                      echo "==========================================="
+                      echo ""
+
+                      packer init macos-sequoia-xcode.pkr.hcl
+
+                      packer build \
+                        -var "base_image=$BASE_IMAGE" \
+                        -var "vm_name=$VM_NAME" \
+                        -var "xcode_version=[$HCL_LIST]" \
+                        -var "xcode_cache_dir=$XCODE_CACHE_DIR" \
+                        -var "push_to_registry=$PUSH" \
+                        -var "registry_image=$REGISTRY_IMAGE" \
+                        macos-sequoia-xcode.pkr.hcl
+
+                      echo ""
+                      echo "==========================================="
+                      echo "[SUCCESS] Image built: $VM_NAME"
+                      if [[ "$PUSH" == "true" ]]; then
+                        echo "[INFO] Pushed to: $REGISTRY_IMAGE"
+                      else
+                        echo "[INFO] Available locally (not pushed)"
+                      fi
+                      echo "==========================================="
+                  timeout: 6h
+              - step:
+                  identifier: Cleanup
+                  type: Run
+                  name: Cleanup
+                  spec:
+                    shell: Sh
+                    command: |-
+                      set -euo pipefail
+                      echo "[INFO] Cleaning up..."
+                      rm -rf "$HOME/XcodesCache" "$HOME/.packer_cache" "$HOME/packer-templates"
+                      rm -f /tmp/gcp-sa.json "$HOME/.docker/config.json"
+                      echo "[SUCCESS] Done"
+                  when:
+                    stageStatus: All
+          buildIntelligence:
+            enabled: false
+        variables:
+          - name: gcp_sa_key
+            type: Secret
+            description: "(GCS mode only) GCP service account key, base64 encoded"
+            required: false
+            value: <+input>
+        delegateSelectors:
+          - mac-delegate-admin
+  variables:
+    - name: base_image
+      type: String
+      description: |-
+        Harness base image to build on top of.
+        Available at: registry-1.docker.io/harness/macos-images
+      required: true
+      value: registry-1.docker.io/harness/macos-images:base_sequoia_15.6.1
+    - name: xcode_versions
+      type: String
+      description: |-
+        Comma-separated Xcode versions to install (full version string with build number).
+        First version becomes the default.
+        e.g: 16.4.0+16F6,16.3.0+16E140
+      required: true
+      value: "16.4.0+16F6,16.3.0+16E140"
+    - name: download_source
+      type: String
+      description: |-
+        Where to download Xcode installers from.
+        "apple" = download from Apple using Apple ID credentials (default)
+        "gcs" = download from a GCS bucket (requires gcp_sa_key and gcs_bucket)
+      required: true
+      value: apple
+    - name: apple_id
+      type: String
+      description: "(Apple mode) Apple Developer account email"
+      required: false
+      value: <+input>
+    - name: apple_password
+      type: Secret
+      description: "(Apple mode) Apple App-Specific Password"
+      required: false
+      value: <+input>
+    - name: gcs_bucket
+      type: String
+      description: "(GCS mode) GCS bucket name containing Xcode xip files"
+      required: false
+      value: ""
+    - name: vm_name
+      type: String
+      description: Name for the locally built VM
+      required: true
+      value: sequoia-xcodes-custom
+    - name: push_to_registry
+      type: String
+      description: Push final image to Docker Hub (true/false)
+      required: true
+      value: "false"
+    - name: registry_image
+      type: String
+      description: |-
+        Full registry path for push (only used if push_to_registry=true)
+        e.g: registry-1.docker.io/yourorg/macos-images:sequoia-xcodes-16.4
+      required: false
+      value: ""
+    - name: dockerhub_username
+      type: String
+      description: Docker Hub username (for pulling base image and optional push)
+      required: true
+      value: <+input>
+    - name: dockerhub_token
+      type: Secret
+      description: Docker Hub access token
+      required: true
+      value: <+input>
+  allowStageExecutions: true
