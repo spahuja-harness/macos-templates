@@ -236,6 +236,9 @@ pipeline:
                       mv "${CFG}.tmp" "$CFG"
                       chmod 600 "$CFG"
                       echo "[SUCCESS] Docker Hub auth configured"
+                  when:
+                    stageStatus: Success
+                    condition: <+pipeline.variables.push_to_registry> == "true"
               - step:
                   identifier: Download_Xcodes
                   type: Run
@@ -431,12 +434,12 @@ pipeline:
       value: ""
     - name: dockerhub_username
       type: String
-      description: Docker Hub username (for pulling base image and optional push)
-      required: true
-      value: <+input>
+      description: Docker Hub username (only needed if push_to_registry=true)
+      required: false
+      value: ""
     - name: dockerhub_token
       type: Secret
-      description: Docker Hub access token
-      required: true
-      value: <+input>
+      description: Docker Hub access token (only needed if push_to_registry=true)
+      required: false
+      value: ""
   allowStageExecutions: true

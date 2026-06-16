@@ -125,8 +125,8 @@ A ready-to-use pipeline is included at `.harness/build-macos-xcodes.yaml`. It do
 | `vm_name` | Local VM name | `sequoia-xcodes-custom` |
 | `push_to_registry` | Push to Docker Hub (`true`/`false`) | `false` |
 | `registry_image` | Full registry path for push | empty |
-| `dockerhub_username` | Docker Hub username | runtime input |
-| `dockerhub_token` | Docker Hub access token | runtime input |
+| `dockerhub_username` | Docker Hub username (only if pushing) | empty |
+| `dockerhub_token` | Docker Hub access token (only if pushing) | empty |
 
 ### Adapting to your environment
 
