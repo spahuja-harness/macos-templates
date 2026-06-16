@@ -131,7 +131,12 @@ A ready-to-use pipeline is included at `.harness/build-macos-xcodes.yaml`. It do
 ### Adapting to your environment
 
 1. **Import the pipeline** into your Harness project
-2. **Update identifiers** — set `projectIdentifier` and `orgIdentifier` to match your project
+2. **Update identifiers** — set `projectIdentifier` and `orgIdentifier` in the YAML to match your Harness project:
+   ```yaml
+   pipeline:
+     projectIdentifier: YOUR_PROJECT
+     orgIdentifier: YOUR_ORG
+   ```
 3. **Configure secrets** — create Harness secrets for:
    - `dockerhub_token` — your Docker Hub access token
    - `gcp_sa_key` — base64-encoded GCP service account JSON with access to your bucket

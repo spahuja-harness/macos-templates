@@ -1,6 +1,8 @@
 pipeline:
   identifier: build_macos_xcodes
   name: build-macos-xcodes
+  projectIdentifier: CI
+  orgIdentifier: PROD
   tags: {}
   stages:
     - stage:
