@@ -1,6 +1,6 @@
 pipeline:
-  identifier: build_macos_xcodes
-  name: build-macos-xcodes
+  identifier: build_custom_macos_image
+  name: Build Custom macOS Image
   projectIdentifier: CI
   orgIdentifier: PROD
   tags: {}

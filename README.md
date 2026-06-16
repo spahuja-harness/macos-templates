@@ -131,9 +131,11 @@ A ready-to-use pipeline is included at `.harness/build-macos-xcodes.yaml`. It do
 ### Adapting to your environment
 
 1. **Import the pipeline** into your Harness project
-2. **Update identifiers** — set `projectIdentifier` and `orgIdentifier` in the YAML to match your Harness project:
+2. **Update identifiers and name** — set `identifier`, `name`, `projectIdentifier`, and `orgIdentifier` in the YAML to match your Harness project:
    ```yaml
    pipeline:
+     identifier: your_pipeline_id
+     name: Your Pipeline Name
      projectIdentifier: YOUR_PROJECT
      orgIdentifier: YOUR_ORG
    ```
