@@ -41,6 +41,7 @@ pipeline:
                   spec:
                     shell: Sh
                     command: |-
+                      echo "Resolving package dependencies for scheme <+input>"
                       xcodebuild -resolvePackageDependencies -scheme "<+input>"
               - step:
                   type: Run
@@ -49,6 +50,7 @@ pipeline:
                   spec:
                     shell: Sh
                     command: |-
+                      echo "Building scheme <+input>"
                       xcodebuild \
                         -scheme "<+input>" \
                         clean build
@@ -60,6 +62,7 @@ pipeline:
                     shell: Sh
                     command: |-
                       set -o pipefail
+                      echo "Testing scheme <+input>"
                       xcodebuild \
                         test \
                         -scheme "<+input>" \

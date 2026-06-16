@@ -5,7 +5,7 @@ Starter Harness CI configuration for running macOS builds on Harness Cloud.
 ## Included template
 
 - `.harness/macos-ci.yaml` configures a Harness CI pipeline that:
-  - runs on `MacOS` with `Arm64`
+  - runs on `macOS` with `Arm64`
   - uses Harness Cloud runtime
   - selects an Xcode installation
   - resolves Swift package dependencies
