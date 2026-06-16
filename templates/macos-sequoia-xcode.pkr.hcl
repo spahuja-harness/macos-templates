@@ -1,3 +1,17 @@
+# Packer template: Build custom macOS image with Xcode versions
+#
+# Sequence:
+#   1. Pull Harness base image (has dev tools + SSH, no Xcode)
+#   2. Boot tart VM (6 CPUs, 12 GB RAM, 350 GB disk), connect via SSH
+#   3. Upload Xcode .xip files from host ~/XcodesCache/ into VM ~/Downloads/
+#   4. Install each Xcode version via xcodes CLI (reverse order)
+#      - Moves app to /Applications/Xcode_{version}.app
+#      - Runs xcodebuild -runFirstLaunch
+#   5. Set first version in list as default (xcode-select)
+#   6. Validate: print installed versions, swift version
+#   7. Cleanup .xip files inside VM
+#   8. Optionally push final image to Docker Hub via tart push
+
 packer {
   required_plugins {
     tart = {
