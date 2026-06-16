@@ -1,0 +1,69 @@
+pipeline:
+  name: macos ci
+  identifier: macos_ci
+  projectIdentifier: <+input>
+  orgIdentifier: <+input>
+  tags: {}
+  properties:
+    ci:
+      codebase:
+        connectorRef: <+input>
+        repoName: <+input>
+        build: <+input>
+  stages:
+    - stage:
+        name: Build and Test
+        identifier: Build_and_Test
+        type: CI
+        spec:
+          cloneCodebase: true
+          platform:
+            os: MacOS
+            arch: Arm64
+          runtime:
+            type: Cloud
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  type: Run
+                  name: Select Xcode
+                  identifier: Select_Xcode
+                  spec:
+                    shell: Sh
+                    command: |-
+                      sudo xcode-select -switch "/Applications/<+input>.app"
+                      xcodebuild -version
+              - step:
+                  type: Run
+                  name: Resolve Dependencies
+                  identifier: Resolve_Dependencies
+                  spec:
+                    shell: Sh
+                    command: |-
+                      echo "Resolving package dependencies for scheme <+input>"
+                      xcodebuild -resolvePackageDependencies -scheme "<+input>"
+              - step:
+                  type: Run
+                  name: Build
+                  identifier: Build
+                  spec:
+                    shell: Sh
+                    command: |-
+                      echo "Building scheme <+input>"
+                      xcodebuild \
+                        -scheme "<+input>" \
+                        clean build
+              - step:
+                  type: Run
+                  name: Test
+                  identifier: Test
+                  spec:
+                    shell: Sh
+                    command: |-
+                      set -o pipefail
+                      echo "Testing scheme <+input>"
+                      xcodebuild \
+                        test \
+                        -scheme "<+input>" \
+                        -destination 'platform=macOS'
