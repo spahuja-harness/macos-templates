@@ -10,7 +10,7 @@ packer {
 variable "base_image" {
   type        = string
   description = "Harness base image to build on top of"
-  default     = "registry-1.docker.io/harness/macos-images:base_sequoia_15.6.1"
+  default     = "registry-1.docker.io/harness/macos-vm-images:base_sequoia_15.6.1"
 }
 
 variable "vm_name" {

@@ -89,7 +89,7 @@ packer init macos-sequoia-xcode.pkr.hcl
 
 # Build (local only, no push)
 packer build \
-  -var 'base_image=registry-1.docker.io/harness/macos-images:base_sequoia_15.6.1' \
+  -var 'base_image=registry-1.docker.io/harness/macos-vm-images:base_sequoia_15.6.1' \
   -var 'vm_name=my-custom-image' \
   -var 'xcode_version=["16.4", "16.3"]' \
   -var 'xcode_cache_dir=~/XcodesCache' \
@@ -100,7 +100,7 @@ packer build \
 
 ```bash
 packer build \
-  -var 'base_image=registry-1.docker.io/harness/macos-images:base_sequoia_15.6.1' \
+  -var 'base_image=registry-1.docker.io/harness/macos-vm-images:base_sequoia_15.6.1' \
   -var 'vm_name=my-custom-image' \
   -var 'xcode_version=["16.4", "16.3"]' \
   -var 'push_to_registry=true' \
