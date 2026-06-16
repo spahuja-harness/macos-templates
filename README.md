@@ -112,22 +112,16 @@ packer build \
 
 ## Using the Harness Pipeline
 
-A ready-to-use pipeline is included at `.harness/build-macos-xcodes.yaml`. It supports two modes for downloading Xcode installers:
-
-- **Apple mode** (default): Downloads directly from Apple using `xcodes` CLI with your Apple ID
-- **GCS mode**: Downloads from your own GCS bucket
+A ready-to-use pipeline is included at `.harness/build-macos-xcodes.yaml`. It downloads Xcode installers from your GCS bucket and builds a custom image using Packer.
 
 ### Pipeline Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `base_image` | Harness base image to build on | `registry-1.docker.io/harness/macos-images:base_sequoia_15.6.1` |
+| `base_image` | Harness base image to build on | `registry-1.docker.io/harness/macos-vm-images:base_sequoia_15.6.1` |
 | `xcode_versions` | Comma-separated versions (e.g. `16.4.0+16F6,16.3.0+16E140`) | `16.4.0+16F6,16.3.0+16E140` |
-| `download_source` | `apple` or `gcs` | `apple` |
-| `apple_id` | Apple Developer email (Apple mode) | runtime input |
-| `apple_password` | Apple App-Specific Password (Apple mode) | runtime input |
-| `gcs_bucket` | GCS bucket name (GCS mode) | empty |
-| `gcp_sa_key` | GCP service account key, base64 (GCS mode) | runtime input |
+| `gcs_bucket` | GCS bucket name containing Xcode xip files | runtime input |
+| `gcp_sa_key` | GCP service account key, base64 encoded | runtime input |
 | `vm_name` | Local VM name | `sequoia-xcodes-custom` |
 | `push_to_registry` | Push to Docker Hub (`true`/`false`) | `false` |
 | `registry_image` | Full registry path for push | empty |
@@ -140,12 +134,11 @@ A ready-to-use pipeline is included at `.harness/build-macos-xcodes.yaml`. It su
 2. **Update identifiers** — set `projectIdentifier` and `orgIdentifier` to match your project
 3. **Configure secrets** — create Harness secrets for:
    - `dockerhub_token` — your Docker Hub access token
-   - `apple_password` (Apple mode) — an App-Specific Password from [appleid.apple.com](https://appleid.apple.com)
-   - `gcp_sa_key` (GCS mode) — base64-encoded GCP service account JSON
+   - `gcp_sa_key` — base64-encoded GCP service account JSON with access to your bucket
 4. **Set delegate selector** — change `mac-delegate-admin` to your macOS ARM64 delegate
 5. **Choose Xcode versions** — update `xcode_versions` with the versions you need
 
-### GCS bucket setup (if using GCS mode)
+### GCS bucket setup
 
 Upload your Xcode `.xip` files to a GCS bucket with this naming convention:
 
@@ -156,17 +149,6 @@ gs://your-bucket/Xcode-{version}.xip
 For example:
 - `gs://your-bucket/Xcode-16.4.0+16F6.xip`
 - `gs://your-bucket/Xcode-16.3.0+16E140.xip`
-
-### Apple mode notes
-
-Apple requires two-factor authentication. For CI use, you need an **App-Specific Password**:
-
-1. Go to [appleid.apple.com](https://appleid.apple.com) → Sign-In and Security → App-Specific Passwords
-2. Generate a new password
-3. Store it as a Harness secret
-4. The `xcodes` CLI will use this for non-interactive downloads
-
-> **Note:** Apple sessions may require periodic re-authentication (~30 days). If downloads fail with auth errors, regenerate the App-Specific Password.
 
 ---
 
