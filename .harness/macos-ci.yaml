@@ -41,7 +41,7 @@ pipeline:
                   spec:
                     shell: Sh
                     command: |-
-                      xcodebuild -resolvePackageDependencies
+                      xcodebuild -resolvePackageDependencies -scheme "<+input>"
               - step:
                   type: Run
                   name: Build

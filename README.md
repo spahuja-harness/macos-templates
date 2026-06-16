@@ -14,5 +14,12 @@ Starter Harness CI configuration for running macOS builds on Harness Cloud.
 ## Using the template
 
 1. Import `.harness/macos-ci.yaml` into Harness.
-2. Provide values for the pipeline inputs such as `orgIdentifier`, `projectIdentifier`, codebase connector, repo name, build, Xcode app name, and Xcode scheme.
-3. If your app requires `-project`, `-workspace`, Fastlane, or additional setup, update the `Run` step commands to match your repository.
+2. Provide values for these pipeline inputs:
+   - `orgIdentifier`
+   - `projectIdentifier`
+   - codebase connector reference
+   - repository name
+   - build reference
+   - Xcode app name, such as `Xcode_16.2`
+   - Xcode scheme for dependency resolution, build, and test
+3. This starter pipeline assumes `xcodebuild` can discover your project automatically. If your app requires `-project`, `-workspace`, Fastlane, or additional setup, update the `Run` step commands to match your repository.
