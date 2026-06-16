@@ -4,7 +4,9 @@ Packer templates and Harness pipelines for building custom macOS images on top o
 
 ## Harness Base Image
 
-The base image (`harness/macos-images:base_sequoia_15.6.1`) includes everything needed for CI except Xcode. You build on top of it.
+Available at: [harness/macos-vm-images on Docker Hub](https://hub.docker.com/r/harness/macos-vm-images/tags)
+
+The base image includes tools needed for Harness CI. Users can add their own binaries, Xcode versions, keychains, and other customizations on top. The example below uses **Sequoia** (`harness/macos-vm-images:base_sequoia_15.6.1`) — the same approach applies to other available images.
 
 ### What's included
 
