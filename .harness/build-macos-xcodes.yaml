@@ -340,11 +340,14 @@ pipeline:
 
                       packer init macos-sequoia-xcode.pkr.hcl
 
+                      SSH_PASSWORD="<+stage.variables.ssh_password>"
+
                       packer build \
                         -var "base_image=$BASE_IMAGE" \
                         -var "vm_name=$VM_NAME" \
                         -var "xcode_version=[$HCL_LIST]" \
                         -var "xcode_cache_dir=$XCODE_CACHE_DIR" \
+                        -var "ssh_password=$SSH_PASSWORD" \
                         -var "push_to_registry=$PUSH" \
                         -var "registry_image=$REGISTRY_IMAGE" \
                         macos-sequoia-xcode.pkr.hcl
@@ -379,6 +382,11 @@ pipeline:
           - name: gcp_sa_key
             type: Secret
             description: GCP service account key, base64 encoded
+            required: true
+            value: <+input>
+          - name: ssh_password
+            type: Secret
+            description: SSH password for the Harness base image VM
             required: true
             value: <+input>
         delegateSelectors:
