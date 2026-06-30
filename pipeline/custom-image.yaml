@@ -1,0 +1,608 @@
+pipeline:
+  identifier: build_custom_macos_image
+  name: build-custom-macos-image
+  projectIdentifier: CI_Sanity
+  orgIdentifier: default
+  tags: {}
+  stages:
+    - stage:
+        identifier: build_custom_provisioned_image
+        type: CI
+        name: Build Custom Provisioned macOS Image
+        description: Pull Harness base image, run customer provisioning scripts, optionally push to registry
+        spec:
+          cloneCodebase: false
+          caching:
+            enabled: false
+            override: true
+            paths: []
+          platform:
+            os: MacOS
+            arch: Arm64
+          runtime:
+            type: Docker
+            spec: {}
+          execution:
+            steps:
+              - step:
+                  identifier: Install_Tools
+                  type: Run
+                  name: Install Tools
+                  spec:
+                    shell: Sh
+                    command: |-
+                      set -euo pipefail
+
+                      export NONINTERACTIVE=1 HOMEBREW_NO_ANALYTICS=1 HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1
+
+                      command -v brew >/dev/null 2>&1 || /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+                      eval "$(/opt/homebrew/bin/brew shellenv)"
+
+                      brew install hashicorp/tap/packer cirruslabs/cli/tart jq
+
+                      echo "[INFO] Installed versions:"
+                      packer -version
+                      tart --version
+                      jq --version
+              - step:
+                  identifier: Write_Provisioning_Script
+                  type: Run
+                  name: Write Provisioning Script
+                  spec:
+                    shell: Sh
+                    command: |-
+                      set -euo pipefail
+
+                      SCRIPT_DIR="$HOME/provisioning-scripts"
+                      mkdir -p "$SCRIPT_DIR"
+
+                      cat > "$SCRIPT_DIR/provision-macos.sh" << 'PROVISION_EOF'
+                      #!/usr/bin/env bash
+
+                      set -euo pipefail
+
+                      echo "Starting macOS provisioning"
+
+                      # Keep base images lean and predictable for CI usage
+                      sudo mdutil -a -i off || true
+                      sudo softwareupdate --schedule off || true
+
+                      if command -v brew >/dev/null 2>&1; then
+                        echo "Homebrew already present"
+                      else
+                        echo "Homebrew is not installed in the base image"
+                        exit 1
+                      fi
+
+                      # Install customer-specific tools
+                      echo "Installing customer tools..."
+                      # Example: brew install sonar-scanner lcov
+                      # Example: brew install --cask gcloud-cli
+                      # Add your customer-specific brew installs here
+
+                      touch "$HOME/.zshrc"
+
+                      # Configure GitHub authentication if token provided
+                      if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+                        cat > "$HOME/.netrc" <<EOF
+                      machine github.com
+                      login oauth2
+                      password ${GITHUB_TOKEN}
+                      EOF
+                        chmod 600 "$HOME/.netrc"
+                        echo "GitHub authentication configured"
+                      fi
+
+                      # Install Apollo Rover CLI (example customer tool)
+                      if [[ "${INSTALL_ROVER:-false}" == "true" ]]; then
+                        ROVER_VERSION="${ROVER_VERSION:-v0.35.0}"
+                        ROVER_BINARY="rover-${ROVER_VERSION}-aarch64-apple-darwin.tar.gz"
+                        DOWNLOAD_URL="https://github.com/apollographql/rover/releases/download/${ROVER_VERSION}/${ROVER_BINARY}"
+
+                        echo "Installing Apollo Rover CLI ${ROVER_VERSION}"
+                        curl -L -o "${ROVER_BINARY}" "${DOWNLOAD_URL}"
+                        mkdir -p "$HOME/.rover/bin"
+                        tar -xzf "${ROVER_BINARY}" -C "$HOME/.rover/bin"
+                        chmod +x "$HOME/.rover/bin/dist/rover"
+
+                        if ! grep -q "\\.rover/bin/dist" "$HOME/.zshrc" 2>/dev/null; then
+                          {
+                            echo ""
+                            echo "# Apollo Rover CLI"
+                            echo 'export PATH="$HOME/.rover/bin/dist:$PATH"'
+                          } >> "$HOME/.zshrc"
+                        fi
+
+                        export PATH="$HOME/.rover/bin/dist:$PATH"
+                        rm -f "${ROVER_BINARY}"
+                        rover --version
+                      fi
+
+                      # Add custom host entries if provided
+                      if [[ -n "${CUSTOM_HOSTS:-}" ]]; then
+                        echo "Adding custom host entries..."
+                        add_host_entry() {
+                          local entry="$1"
+                          if ! grep -Fqx "$entry" /etc/hosts; then
+                            printf '%s\n' "$entry" | sudo tee -a /etc/hosts >/dev/null
+                            echo "Added: $entry"
+                          fi
+                        }
+
+                        # Parse CUSTOM_HOSTS (format: "ip\thost,ip\thost")
+                        IFS=',' read -ra HOST_ENTRIES <<< "$CUSTOM_HOSTS"
+                        for ENTRY in "${HOST_ENTRIES[@]}"; do
+                          ENTRY=$(echo "$ENTRY" | xargs)
+                          add_host_entry "$ENTRY"
+                        done
+                      fi
+
+                      # Select Xcode version if specified
+                      if [[ -n "${XCODE_VERSION:-}" ]]; then
+                        XCODE_PATH="/Applications/Xcode_${XCODE_VERSION}.app"
+                        if [[ -d "$XCODE_PATH" ]]; then
+                          echo "Setting default Xcode to version ${XCODE_VERSION}"
+                          sudo xcode-select -s "${XCODE_PATH}/Contents/Developer"
+                          xcodebuild -version
+                        else
+                          echo "WARNING: Xcode ${XCODE_VERSION} not found at ${XCODE_PATH}"
+                        fi
+                      fi
+
+                      # Run custom commands if provided
+                      if [[ -n "${CUSTOM_COMMANDS:-}" ]]; then
+                        echo "Running custom commands..."
+                        eval "$CUSTOM_COMMANDS"
+                      fi
+
+                      echo "Provisioning finished"
+                      PROVISION_EOF
+
+                      chmod +x "$SCRIPT_DIR/provision-macos.sh"
+                      echo "[SUCCESS] Provisioning script written to $SCRIPT_DIR/provision-macos.sh"
+              - step:
+                  identifier: Write_Packer_Template
+                  type: Run
+                  name: Write Packer Template
+                  spec:
+                    shell: Sh
+                    command: |-
+                      set -euo pipefail
+
+                      DEST="$HOME/packer-templates"
+                      mkdir -p "$DEST"
+
+                      cat > "$DEST/custom-macos.pkr.hcl" << 'PACKER_EOF'
+                      packer {
+                        required_plugins {
+                          tart = {
+                            version = ">= 1.12.0"
+                            source  = "github.com/cirruslabs/tart"
+                          }
+                        }
+                      }
+
+                      variable "base_image" {
+                        type        = string
+                        description = "Harness base image to build on top of"
+                      }
+
+                      variable "vm_name" {
+                        type        = string
+                        description = "Name for the output VM"
+                      }
+
+                      variable "ssh_username" {
+                        type      = string
+
+                        sensitive = true
+                        default   = "anka"
+                      }
+
+                      variable "ssh_password" {
+                        type      = string
+                        sensitive = true
+                        default   = "admin"
+                      }
+
+                      variable "cpu_count" {
+                        type        = number
+                        description = "Virtual CPU count"
+                        default     = 6
+                      }
+
+                      variable "memory_gb" {
+                        type        = number
+                        description = "Memory size in GB"
+                        default     = 12
+                      }
+
+                      variable "disk_size_gb" {
+                        type        = number
+                        description = "Disk size in GB"
+                        default     = 350
+                      }
+
+                      variable "github_token" {
+                        type        = string
+                        sensitive   = true
+                        description = "GitHub token for authentication"
+                        default     = ""
+                      }
+
+                      variable "install_rover" {
+                        type        = bool
+                        description = "Install Apollo Rover CLI"
+                        default     = false
+                      }
+
+                      variable "rover_version" {
+                        type        = string
+                        description = "Apollo Rover CLI version"
+                        default     = "v0.35.0"
+                      }
+
+                      variable "custom_hosts" {
+                        type        = string
+                        description = "Custom host entries (format: ip\\thost,ip\\thost)"
+                        default     = ""
+                      }
+
+                      variable "xcode_version" {
+                        type        = string
+                        description = "Default Xcode version to select"
+                        default     = ""
+                      }
+
+                      variable "custom_commands" {
+                        type        = string
+                        description = "Additional commands to run during provisioning"
+                        default     = ""
+                      }
+
+                      variable "push_to_registry" {
+                        type        = bool
+                        description = "Whether to push the built image to a registry"
+                        default     = false
+                      }
+
+                      variable "registry_image" {
+                        type        = string
+                        description = "Full registry path to push"
+                        default     = ""
+                      }
+
+                      source "tart-cli" "tart" {
+                        vm_base_name       = var.base_image
+                        vm_name            = var.vm_name
+                        cpu_count          = var.cpu_count
+                        memory_gb          = var.memory_gb
+                        disk_size_gb       = var.disk_size_gb
+                        ssh_password       = var.ssh_password
+                        ssh_username       = var.ssh_username
+                        ssh_timeout        = "180s"
+                        create_grace_time  = "120s"
+                        recovery_partition = "keep"
+                      }
+
+                      build {
+                        sources = ["source.tart-cli.tart"]
+
+                        provisioner "shell" {
+                          environment_vars = [
+                            "GITHUB_TOKEN=${var.github_token}",
+                            "INSTALL_ROVER=${var.install_rover}",
+                            "ROVER_VERSION=${var.rover_version}",
+                            "CUSTOM_HOSTS=${var.custom_hosts}",
+                            "XCODE_VERSION=${var.xcode_version}",
+                            "CUSTOM_COMMANDS=${var.custom_commands}",
+                          ]
+                          script = pathexpand("~/provisioning-scripts/provision-macos.sh")
+                        }
+
+                        provisioner "shell" {
+                          inline = [
+                            "echo '=== Provisioning Summary ==='",
+                            "echo 'macOS Version:' && sw_vers",
+                            "echo ''",
+                            "echo 'Homebrew Version:' && brew --version | head -1",
+                            "echo ''",
+                            "if command -v rover >/dev/null 2>&1; then echo 'Rover CLI:' && rover --version; fi",
+                            "echo ''",
+                            "echo 'Default Xcode:' && xcode-select -p && xcodebuild -version",
+                            "echo ''",
+                            "echo 'Available Xcodes:'",
+                            "ls -1d /Applications/Xcode*.app 2>/dev/null || echo 'None found'",
+                          ]
+                        }
+
+                        provisioner "shell" {
+                          inline = [
+                            "rm -f /Users/${var.ssh_username}/.netrc",
+                          ]
+                        }
+
+                        post-processor "shell-local" {
+                          inline = concat(
+                            var.push_to_registry && var.registry_image != "" ? [
+                              "tart push ${var.vm_name} ${var.registry_image}",
+                              "echo '[SUCCESS] Pushed to ${var.registry_image}'"
+                            ] : [
+                              "echo '[INFO] Push disabled — image available locally as: ${var.vm_name}'"
+                            ]
+                          )
+                        }
+                      }
+                      PACKER_EOF
+
+                      echo "[SUCCESS] Packer template written to $DEST/custom-macos.pkr.hcl"
+              - step:
+                  identifier: Validate_Provisioning_Script
+                  type: Run
+                  name: Validate Provisioning Script
+                  spec:
+                    shell: Sh
+                    command: |-
+                      set -euo pipefail
+
+                      SCRIPT_DIR="$HOME/provisioning-scripts"
+                      SCRIPT_FILE="$SCRIPT_DIR/provision-macos.sh"
+
+                      if [[ ! -f "$SCRIPT_FILE" ]]; then
+                        echo "[ERROR] Provisioning script not found at $SCRIPT_FILE"
+                        exit 1
+                      fi
+
+                      echo "[INFO] Provisioning script found:"
+                      ls -lh "$SCRIPT_FILE"
+                      echo ""
+
+                      echo "[INFO] Checking bash syntax..."
+                      if bash -n "$SCRIPT_FILE"; then
+                        echo "[SUCCESS] Syntax check passed"
+                      else
+                        echo "[ERROR] Syntax check failed"
+                        exit 1
+                      fi
+
+                      echo ""
+                      echo "[INFO] Script validation complete - will be uploaded to VM during Packer build"
+              - step:
+                  identifier: Write_Build_Script
+                  type: Run
+                  name: Write Build Script
+                  spec:
+                    shell: Sh
+                    command: |-
+                      set -euo pipefail
+
+                      BUILD_DIR="$HOME/packer-build"
+                      mkdir -p "$BUILD_DIR"
+
+                      BASE_IMAGE="<+pipeline.variables.base_image>"
+                      VM_NAME="<+pipeline.variables.vm_name>"
+                      PUSH="<+pipeline.variables.push_to_registry>"
+                      REGISTRY_IMAGE="<+pipeline.variables.registry_image>"
+                      GITHUB_TOKEN="<+pipeline.variables.github_token>"
+                      INSTALL_ROVER="<+pipeline.variables.install_rover>"
+                      ROVER_VERSION="<+pipeline.variables.rover_version>"
+                      CUSTOM_HOSTS="<+pipeline.variables.custom_hosts>"
+                      XCODE_VERSION="<+pipeline.variables.xcode_version>"
+                      CUSTOM_COMMANDS="<+pipeline.variables.custom_commands>"
+
+                      cat > "$BUILD_DIR/build-macos.sh" << 'BUILD_EOF'
+                      #!/usr/bin/env bash
+
+                      set -euo pipefail
+
+                      PACKER_DIR="$HOME/packer-templates"
+                      TEMPLATE_FILE="${PACKER_DIR}/custom-macos.pkr.hcl"
+
+                      echo "Running Tart + Packer build"
+
+                      if ! command -v tart >/dev/null 2>&1; then
+                        echo "[ERROR] tart is not installed"
+                        echo "Install with: brew install cirruslabs/cli/tart"
+                        exit 1
+                      fi
+
+                      if ! command -v packer >/dev/null 2>&1; then
+                        echo "[ERROR] packer is not installed"
+                        echo "Install with: brew install hashicorp/tap/packer"
+                        exit 1
+                      fi
+
+                      cd "${PACKER_DIR}"
+
+                      export PACKER_LOG=1
+                      export PACKER_LOG_PATH="$HOME/logs/packer.log"
+                      export PACKER_NO_COLOR=1
+                      mkdir -p "$HOME/logs"
+
+                      trap 'echo "--- packer log (last 200 lines) ---"; tail -n 200 "$PACKER_LOG_PATH" || true' ERR
+
+                      echo "==========================================="
+                      echo "[INFO] Build Configuration"
+                      echo "  Base Image:       ${BASE_IMAGE}"
+                      echo "  VM Name:          ${VM_NAME}"
+                      echo "  Install Rover:    ${INSTALL_ROVER}"
+                      echo "  Rover Version:    ${ROVER_VERSION}"
+                      echo "  Xcode Version:    ${XCODE_VERSION:-default}"
+                      echo "  Push to Registry: ${PUSH}"
+                      if [[ "${PUSH}" == "true" ]]; then
+                        echo "  Registry Image:   ${REGISTRY_IMAGE}"
+                      fi
+                      echo "==========================================="
+                      echo ""
+
+                      echo "Initializing Packer plugins"
+                      packer init "${TEMPLATE_FILE}"
+
+                      echo "Validating template"
+                      packer validate \
+                        -var "base_image=${BASE_IMAGE}" \
+                        -var "vm_name=${VM_NAME}" \
+                        -var "github_token=${GITHUB_TOKEN}" \
+                        -var "install_rover=${INSTALL_ROVER}" \
+                        -var "rover_version=${ROVER_VERSION}" \
+                        -var "custom_hosts=${CUSTOM_HOSTS}" \
+                        -var "xcode_version=${XCODE_VERSION}" \
+                        -var "custom_commands=${CUSTOM_COMMANDS}" \
+                        -var "push_to_registry=${PUSH}" \
+                        -var "registry_image=${REGISTRY_IMAGE}" \
+                        "${TEMPLATE_FILE}"
+
+                      echo "Building Tart VM"
+                      packer build \
+                        -var "base_image=${BASE_IMAGE}" \
+                        -var "vm_name=${VM_NAME}" \
+                        -var "github_token=${GITHUB_TOKEN}" \
+                        -var "install_rover=${INSTALL_ROVER}" \
+                        -var "rover_version=${ROVER_VERSION}" \
+                        -var "custom_hosts=${CUSTOM_HOSTS}" \
+                        -var "xcode_version=${XCODE_VERSION}" \
+                        -var "custom_commands=${CUSTOM_COMMANDS}" \
+                        -var "push_to_registry=${PUSH}" \
+                        -var "registry_image=${REGISTRY_IMAGE}" \
+                        "${TEMPLATE_FILE}"
+
+                      echo ""
+                      echo "==========================================="
+                      echo "[SUCCESS] Image built: ${VM_NAME}"
+                      if [[ "${PUSH}" == "true" ]]; then
+                        echo "[INFO] Pushed to: ${REGISTRY_IMAGE}"
+                      else
+                        echo "[INFO] Available locally (not pushed)"
+                      fi
+                      echo "==========================================="
+                      BUILD_EOF
+
+                      # Substitute variables into the script
+                      sed -i.bak \
+                        -e "s|\${BASE_IMAGE}|${BASE_IMAGE}|g" \
+                        -e "s|\${VM_NAME}|${VM_NAME}|g" \
+                        -e "s|\${GITHUB_TOKEN}|${GITHUB_TOKEN}|g" \
+                        -e "s|\${INSTALL_ROVER}|${INSTALL_ROVER}|g" \
+                        -e "s|\${ROVER_VERSION}|${ROVER_VERSION}|g" \
+                        -e "s|\${CUSTOM_HOSTS}|${CUSTOM_HOSTS}|g" \
+                        -e "s|\${XCODE_VERSION}|${XCODE_VERSION}|g" \
+                        -e "s|\${CUSTOM_COMMANDS}|${CUSTOM_COMMANDS}|g" \
+                        -e "s|\${PUSH}|${PUSH}|g" \
+                        -e "s|\${REGISTRY_IMAGE}|${REGISTRY_IMAGE}|g" \
+                        "$BUILD_DIR/build-macos.sh"
+
+                      rm -f "$BUILD_DIR/build-macos.sh.bak"
+                      chmod +x "$BUILD_DIR/build-macos.sh"
+
+                      echo "[SUCCESS] Build script written to $BUILD_DIR/build-macos.sh"
+              - step:
+                  identifier: Execute_Build
+                  type: Run
+                  name: Execute Packer Build
+                  spec:
+                    shell: Sh
+                    command: |-
+                      set -euo pipefail
+
+                      BUILD_DIR="$HOME/packer-build"
+                      BUILD_SCRIPT="$BUILD_DIR/build-macos.sh"
+
+                      if [[ ! -f "$BUILD_SCRIPT" ]]; then
+                        echo "[ERROR] Build script not found at $BUILD_SCRIPT"
+                        exit 1
+                      fi
+
+                      echo "[INFO] Executing build script..."
+                      bash "$BUILD_SCRIPT"
+                  timeout: 3h
+              - step:
+                  identifier: Cleanup
+                  type: Run
+                  name: Cleanup
+                  spec:
+                    shell: Sh
+                    command: |-
+                      set -euo pipefail
+                      echo "[INFO] Cleaning up..."
+                      rm -rf "$HOME/.packer_cache" "$HOME/logs"
+                      rm -f "$HOME/.docker/config.json"
+                      echo "[SUCCESS] Done"
+                  when:
+                    stageStatus: All
+          buildIntelligence:
+            enabled: false
+        delegateSelectors:
+          - mac-mini-06-test
+  variables:
+    - name: base_image
+      type: String
+      description: |-
+        Harness base image to build on top of.
+        Available at: registry-1.docker.io/harness/macos-images
+      required: true
+      value: <+input>.default(registry-1.docker.io/harness/macos-images:base_sequoia_15.6.1)
+    - name: vm_name
+      type: String
+      description: Name for the locally built VM
+      required: true
+      value: <+input>.default(custom-macos-provisioned)
+    - name: github_token
+      type: Secret
+      description: GitHub token for authentication (optional)
+      required: false
+      value: <+input>
+    - name: install_rover
+      type: String
+      description: Install Apollo Rover CLI (true/false)
+      required: true
+      value: <+input>.default(false).selectOneFrom(true,false)
+    - name: rover_version
+      type: String
+      description: Apollo Rover CLI version
+      required: false
+      value: <+input>.default(v0.35.0)
+    - name: custom_hosts
+      type: String
+      description: |-
+        Custom host entries in format: ip\thost,ip\thost
+        Example: 10.183.32.77\tstorage.googleapis.com,10.183.32.77\toauth2.googleapis.com
+      required: false
+      value: <+input>
+    - name: xcode_version
+      type: String
+      description: |-
+        Xcode version to set as default (e.g., 16.4, 16.3)
+        Assumes Xcode is already installed in base image
+      required: false
+      value: <+input>
+    - name: custom_commands
+      type: String
+      description: |-
+        Additional shell commands to run during provisioning
+        Example: brew install sonar-scanner lcov
+      required: false
+      value: <+input>
+    - name: push_to_registry
+      type: String
+      description: Push final image to Docker Hub (true/false)
+      required: true
+      value: <+input>.default(false).selectOneFrom(true,false)
+    - name: registry_image
+      type: String
+      description: |-
+        Full registry path for push (only used if push_to_registry=true)
+        e.g: registry-1.docker.io/yourorg/macos-images:custom-provisioned
+      required: false
+      value: <+input>
+    - name: dockerhub_username
+      type: String
+      description: Docker Hub username (for pulling base image and optional push)
+      required: true
+      value: <+input>
+    - name: dockerhub_token
+      type: Secret
+      description: Docker Hub access token
+      required: true
+      value: <+input>
+  allowStageExecutions: true
+
